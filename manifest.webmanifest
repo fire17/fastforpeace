@@ -1,0 +1,26 @@
+{
+  "name": "צום לשלום 2026 · סוכת השלום",
+  "short_name": "צום לשלום",
+  "description": "צום מים של אדם אחד בסוכת השלום, כיכר הבימה, תל אביב. ההסבר לשוטר ולפקח, החוק, הבקשה לעירייה והמסמכים, זמינים גם בלי קליטה.",
+  "lang": "he",
+  "dir": "rtl",
+  "id": "./",
+  "start_url": "./#/",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b1828",
+  "theme_color": "#0b1828",
+  "categories": ["utilities", "education"],
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "שלום אדוני השוטר", "short_name": "שוטר", "url": "./#/police/show" },
+    { "name": "שלום אדוני הפקח", "short_name": "פקח", "url": "./#/inspector/show" },
+    { "name": "בקשה 3885", "short_name": "בקשה", "url": "./#/request" }
+  ]
+}
