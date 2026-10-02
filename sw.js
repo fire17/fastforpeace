@@ -3,7 +3,7 @@
    Install = the app shell only, all-or-nothing (small). Everything else (documents, source snapshots, the PDF
    renderer, ONE audio encoding) is added file by file, each failure tolerated, at install and again on every page
    load ({type:'backfill'} message from app.js), so one dropped request on a weak signal never costs offline mode. */
-const VERSION = 'ffp-cbcf444dac'; /* @version */
+const VERSION = 'ffp-1ffc942318'; /* @version */
 const PRECACHE = [/* @precache */
   "./",
   "404.html",
