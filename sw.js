@@ -1,14 +1,18 @@
-/* Service worker — precaches EVERYTHING (pages, audio, documents) so the hub works with no signal.
-   VERSION and PRECACHE are stamped by tools/build-data.py (content hash) — re-run it after any change. */
-const VERSION = 'ffp-99dbc270ba'; /* @version */
+/* Service worker — precaches the hub so it works with no signal.
+   VERSION and PRECACHE are stamped by tools/build-data.py (content hash) — re-run it after any change.
+   Install = the app shell only, all-or-nothing (small). Everything else (documents, source snapshots, the PDF
+   renderer, ONE audio encoding) is added file by file, each failure tolerated, at install and again on every page
+   load ({type:'backfill'} message from app.js), so one dropped request on a weak signal never costs offline mode. */
+const VERSION = 'ffp-cbcf444dac'; /* @version */
 const PRECACHE = [/* @precache */
   "./",
   "404.html",
   "app.js",
   "data.js",
-  "index.html",
   "manifest.webmanifest",
   "styles.css",
+  "viewer.css",
+  "viewer.js",
   "audio/inspector.m4a",
   "audio/inspector.mp3",
   "audio/inspector.ogg",
@@ -27,14 +31,47 @@ const PRECACHE = [/* @precache */
   "icons/dove.svg",
   "icons/icon-192.png",
   "icons/icon-512.png",
-  "icons/icon.svg"
+  "icons/icon.svg",
+  "sources/acri-guide-ch2-licensing.html",
+  "sources/acri-guide-ch6-protest-tents.html",
+  "sources/acri-identify-to-police.html",
+  "sources/acri-photography-manual-2016.pdf",
+  "sources/acri-tlv-tent-approval-letter.html",
+  "sources/ag-guideline-3-1200.pdf",
+  "sources/bagatz-5078-20-fdida.pdf",
+  "sources/id-card-law-wikisource.html",
+  "sources/noise-regulations-nevo.html",
+  "sources/police-ordinance-nevo.html",
+  "sources/tlv-bylaw-order-cleanliness-nevo.html",
+  "sources/tlv-events-approval.html",
+  "sources/tlv-noise-bylaw.pdf",
+  "vendor/pdfjs/pdf.min.js",
+  "vendor/pdfjs/pdf.worker.min.js"
 ];
 const FONT_CACHE = 'ffp-fonts-v1';
+
+const SCOPE = new URL(self.registration.scope).pathname;
+const IS_SHELL = (p) => !/^(audio|docs|sources|vendor)\//.test(p);
+const SHELL = PRECACHE.filter(IS_SHELL);
+const AUDIO_EXT = /\.(m4a|mp3|ogg)$/;
+
+/* Add what is missing, one file at a time; a failed file is skipped (retried on the next page load). */
+async function backfill(audioExt) {
+  const cache = await caches.open(VERSION);
+  const want = PRECACHE.filter((p) => !IS_SHELL(p) && (!AUDIO_EXT.test(p) || (audioExt && p.endsWith('.' + audioExt))));
+  let added = 0, failed = 0;
+  for (const p of want) {
+    if (await cache.match(p)) continue;
+    try { await cache.add(new Request(p, { cache: 'reload' })); added++; } catch (e) { failed++; }
+  }
+  return { added, failed };
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(VERSION)
-      .then((cache) => cache.addAll(PRECACHE.map((p) => new Request(p, { cache: 'reload' }))))
+      .then((cache) => cache.addAll(SHELL.map((p) => new Request(p, { cache: 'reload' }))))
+      .then(() => backfill(null))
       .then(() => self.skipWaiting())
   );
 });
@@ -45,6 +82,13 @@ self.addEventListener('activate', (event) => {
       .then((keys) => Promise.all(keys.filter((k) => k !== VERSION && k !== FONT_CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
+});
+
+self.addEventListener('message', (event) => {
+  const d = event.data || {};
+  if (d.type !== 'backfill') return;
+  const ext = /^(m4a|mp3|ogg)$/.test(d.audio) ? d.audio : null;
+  event.waitUntil(backfill(ext).then((r) => { if (event.source) event.source.postMessage({ type: 'backfilled', ...r }); }));
 });
 
 /* Audio needs byte-range answers (Safari asks for "bytes=0-1" first). Serve 206 from the cached file. */
@@ -83,27 +127,51 @@ async function rangeResponse(request) {
   });
 }
 
-/* Cache-first for our own files, refreshed in the background. */
+/* Cache-first for our own files. No background re-download: every precached file is versioned by VERSION
+   (a content hash), so a changed file arrives with the next service worker, not by re-fetching on every hit. */
 async function cacheFirst(request) {
   const cache = await caches.open(VERSION);
   const hit = await cache.match(request, { ignoreSearch: true });
-  const refresh = fetch(request).then((res) => {
-    if (res && res.ok && res.type === 'basic') cache.put(request, res.clone());
-    return res;
-  }).catch(() => null);
   if (hit) return hit;
-  const res = await refresh;
-  return res || new Response('', { status: 504, statusText: 'Offline' });
-}
-
-async function navigation(request) {
-  const cache = await caches.open(VERSION);
   try {
     const res = await fetch(request);
-    if (res && res.ok) cache.put('./', res.clone());
+    if (res && res.ok && res.type === 'basic') cache.put(request, res.clone());
     return res;
   } catch (e) {
-    return (await cache.match('./')) || (await cache.match('index.html')) || new Response('Offline', { status: 503 });
+    return new Response('', { status: 504, statusText: 'Offline' });
+  }
+}
+
+/* The app's own document (scope root or index.html): network with a short timeout, cached shell otherwise.
+   Only THIS response is ever stored under './'. */
+async function shellNavigation(request) {
+  const cache = await caches.open(VERSION);
+  const net = fetch(request).then((res) => {
+    if (res && res.ok && res.type === 'basic') cache.put('./', res.clone());
+    return res;
+  });
+  const cached = () => cache.match('./').then((r) => r || cache.match('index.html'));
+  const timeout = new Promise((resolve) => setTimeout(() => cached().then((r) => r && resolve(r)), 2500));
+  try {
+    return await Promise.race([net, timeout]);
+  } catch (e) {
+    return (await cached()) || new Response('Offline', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  }
+}
+
+/* Any other navigation — the source viewer's iframes (sources/*.html), a PDF or image opened in a new tab:
+   the file itself, cache-first (all of them are precached), never the app shell. */
+async function fileNavigation(request) {
+  const cache = await caches.open(VERSION);
+  const hit = await cache.match(request, { ignoreSearch: true });
+  if (hit) return hit;
+  try {
+    const res = await fetch(request);
+    if (res && res.ok && res.type === 'basic') cache.put(request, res.clone());
+    return res;
+  } catch (e) {
+    return new Response('<!doctype html><meta charset="utf-8"><title>Offline</title><p dir="rtl">הקובץ הזה עוד לא נשמר במכשיר. נסו שוב כשיש קליטה.</p>',
+      { status: 504, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
 }
 
@@ -128,11 +196,8 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   if (req.headers.has('range')) { event.respondWith(rangeResponse(req)); return; }
   if (req.mode === 'navigate') {
-    /* Short-timeout network for the page itself, cache when offline. */
-    event.respondWith(Promise.race([
-      navigation(req),
-      new Promise((resolve) => setTimeout(() => caches.open(VERSION).then((c) => c.match('./')).then((r) => r && resolve(r)), 2500)),
-    ]));
+    const shell = req.destination !== 'iframe' && (url.pathname === SCOPE || url.pathname === SCOPE + 'index.html');
+    event.respondWith(shell ? shellNavigation(req) : fileNavigation(req));
     return;
   }
   event.respondWith(cacheFirst(req));

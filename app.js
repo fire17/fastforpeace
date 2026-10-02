@@ -27,6 +27,39 @@
   const ext = (url, label, cls) => `<a class="${cls || 'cite'}" href="${esc(url)}" target="_blank" rel="noopener">${icon('ext')}<span>${esc(label)}</span></a>`;
   const CARD_ICON = { night: 'moon', 'crowd-or-speaker': 'mega', 'health-medics': 'heart', 'after-holiday': 'leaf' };
 
+  /* ---------- sources: in-site preview links (#/source/<slug>?h=<i>, rendered by viewer.js) ---------- */
+  const SRC = D.sources || [];
+  const SV = window.FFPViewer || null;
+  const srcBy = {}, hlAt = {}, srcByLabel = {}, srcByFile = {};
+  SRC.forEach((s) => {
+    srcBy[s.slug] = s;
+    (s.highlights || []).forEach((h, i) => { hlAt[h.hl_id] = { slug: s.slug, h: i }; });
+    (s.cited_by_links || []).forEach((l) => { srcByLabel[l] = s.slug; });
+    if (s.file) srcByFile[s.file] = s.slug;
+  });
+  const previewable = (t) => !!(SV && t && srcBy[t.slug] && srcBy[t.slug].kind !== 'link-only' && srcBy[t.slug].file);
+  /* Several quotes behind one citation: open at the first one that backs the claim (supports / obligation). */
+  function pickHl(slug, ids) {
+    const at = (ids || []).map((id) => hlAt[id]).filter((t) => t && t.slug === slug);
+    const yes = at.find((t) => /^(supports|obligation)$/.test(srcBy[slug].highlights[t.h].stance));
+    return yes || at[0] || { slug, h: null };
+  }
+  const citeTarget = new Map(); /* officials citation object -> { slug, h } */
+  (() => {
+    const byPath = {};
+    SRC.forEach((s) => (s.cited_by_officials || []).forEach((c) => { byPath[c.path] = pickHl(s.slug, c.hl_ids); }));
+    const add = (path, c) => { if (byPath[path]) citeTarget.set(c, byPath[path]); };
+    ['police', 'inspector'].forEach((w) => (OFF[w].points || []).forEach((p, i) => (p.citations || []).forEach((c, j) => add(`officials.${w}.points[${i}].citations[${j}]`, c))));
+    (OFF.cards || []).forEach((cd, i) => (cd.citations || []).forEach((c, j) => add(`officials.cards[${i}].citations[${j}]`, c)));
+  })();
+  const srcHref = (t) => `#/source/${encodeURIComponent(t.slug)}${t.h != null ? `?h=${t.h}` : ''}`;
+  /* The captured original inside the site when we hold one; the official site otherwise (link-only sources). */
+  function srcLink(t, url, label, cls) {
+    if (!previewable(t)) return ext(url, label, cls);
+    return `<a class="${cls || 'cite'}" href="${srcHref(t)}" data-orig="${esc(url)}">${icon('src')}<span>${esc(label)}</span></a>`;
+  }
+  const linkTarget = (l) => (srcByLabel[l.label_he] ? { slug: srcByLabel[l.label_he], h: null } : null);
+
   function store(key, val) {
     try { if (val === undefined) return localStorage.getItem(key); localStorage.setItem(key, val); } catch (e) { /* storage may be blocked */ }
     return null;
@@ -76,7 +109,7 @@
 
   function citesHTML(list) {
     if (!list || !list.length) return '';
-    return `<ul class="cites">${list.map((c) => `<li>${ext(c.url, c.label)}</li>`).join('')}</ul>`;
+    return `<ul class="cites">${list.map((c) => `<li>${srcLink(citeTarget.get(c), c.url, c.label)}</li>`).join('')}</ul>`;
   }
   function uniqueCites(groups) {
     const seen = new Set(); const out = [];
@@ -84,14 +117,39 @@
     return out;
   }
 
-  function player(who, big) {
-    const a = OFF[who].audio;
-    return `<div class="player${big ? ' player-big' : ''}" data-player>
-      <button class="player-btn" type="button" aria-label="השמעת ההסבר הקולי">${icon('play', 'i-play')}${icon('pause', 'i-pause')}</button>
-      <div class="player-body">
-        <div class="player-title">${big ? 'האזינו להסבר הקולי' : 'הסבר קולי למסירה'}<span class="player-sub">${big ? 'עברית · ' : ''}${fmtTime(a.duration_s)}</span></div>
-        <div class="player-bar" role="slider" tabindex="0" aria-label="מיקום בהקלטה" aria-valuemin="0" aria-valuemax="${Math.round(a.duration_s)}" aria-valuenow="0"><div class="player-fill"></div></div>
+  /* One reusable player for every recording on the site.
+     Transport + timeline are dir="ltr" on purpose: media time runs left→right even in Hebrew UIs
+     (Material/Apple bidi guidance, YouTube/Spotify in Hebrew), labels stay Hebrew. */
+  const RATES = [0.75, 1, 1.25, 1.5, 2];
+  const rateLabel = (r) => r + '×';
+  const fmtSpoken = (s) => { s = Math.max(0, Math.floor(s || 0)); const m = Math.floor(s / 60), r = s % 60; return (m ? `${m} דקות ` : '') + `${r} שניות`; };
+  function player(who, opts) {
+    if (typeof opts !== 'object') opts = { big: !!opts };
+    const a = OFF[who].audio, big = !!opts.big;
+    const dur = Math.round(a.duration_s || 0);
+    const title = opts.title || (big ? 'האזינו להסבר הקולי' : 'הסבר קולי למסירה');
+    const skip = (n, sm) => {
+      const fwd = n > 0, k = Math.abs(n);
+      return `<button class="pskip${sm ? ' pskip-sm' : ''}" type="button" data-skip="${n}" aria-label="${k} שניות ${fwd ? 'קדימה' : 'אחורה'}" title="${k} שניות ${fwd ? 'קדימה' : 'אחורה'}">${sm ? `<span class="pskip-n">${fwd ? '+' : '−'}${k}</span>` : `${icon(fwd ? 'fwd' : 'rew')}<span class="pskip-n">${k}</span>`}</button>`;
+    };
+    return `<div class="player${big ? ' player-big' : ''}${opts.compact ? ' player-compact' : ''}" data-player role="group" aria-label="${esc(title)}">
+      <div class="player-head">
+        <div class="player-title">${esc(title)}<span class="player-sub">${big ? 'עברית · ' : ''}${fmtTime(a.duration_s)}</span></div>
+      </div>
+      <div class="player-track" dir="ltr">
+        <div class="player-bar" role="slider" tabindex="0" aria-label="מיקום בהקלטה" aria-valuemin="0" aria-valuemax="${dur}" aria-valuenow="0" aria-valuetext="0 שניות מתוך ${esc(fmtSpoken(dur))}">
+          <div class="player-rail"><div class="player-fill"></div></div><div class="player-knob"></div><div class="player-tip" aria-hidden="true">0:00</div>
+        </div>
         <div class="player-time"><span class="t-cur">0:00</span><span class="t-dur">${fmtTime(a.duration_s)}</span></div>
+      </div>
+      <div class="player-ctrls" dir="ltr">
+        ${skip(-5, true)}${skip(-10)}
+        <button class="player-btn" type="button" aria-label="השמעה">${icon('play', 'i-play')}${icon('pause', 'i-pause')}</button>
+        ${skip(10)}${skip(5, true)}
+      </div>
+      <div class="player-rates" role="group" aria-label="מהירות השמעה">
+        <span class="player-rates-k" aria-hidden="true">מהירות</span>
+        <div class="player-rates-in" dir="ltr">${RATES.map((r) => `<button class="prate" type="button" data-rate="${r}" aria-pressed="${r === 1}" aria-label="מהירות ${rateLabel(r)}">${rateLabel(r)}</button>`).join('')}</div>
       </div>
       <audio preload="none">
         <source src="${esc(a.m4a)}" type="audio/mp4">
@@ -128,7 +186,7 @@
         <span class="show-brand">${dove('show-dove')}<span>צום לשלום 2026</span></span>
         <span class="show-tools">
           <button class="show-btn" type="button" data-size aria-label="הגדלת הטקסט">${icon('text')}</button>
-          <button class="show-btn show-exit" type="button" data-exit>${icon('x')}<span>סיום — החזר לי</span></button>
+          <button class="show-btn show-exit" type="button" data-exit aria-label="סיום — החזר לי">${icon('x')}<span class="show-exit-t">סיום — החזר לי</span></button>
         </span>
       </div>
       <article class="show-body">${inner}</article>
@@ -277,7 +335,7 @@
     const pillars = [
       ['#/law/police-license', 'רישיון משטרה', 'לא נדרש', 'פקודת המשטרה ס׳ 83–84; הנחיית היועמ״ש 3.1200; נוהל 221.110.19 נספח ד׳.'],
       ['#/law/structure-municipal', 'הסוכה', 'עניין עירוני', 'חוק העזר של תל אביב ס׳ 39(א)(1); בג״ץ 5078/20 פדידה, פס׳ 3.'],
-      ['#/law/general-tent-permit', 'ההיתר הכללי', 'עד 48 שעות', 'מעבר לכך נדרש היתר פרטני (ס׳ 6), ולכן הוגשה בקשה 3885.'],
+      ['#/law/general-tent-permit', 'ההיתר הכללי', 'אוהל בלבד', 'עד 48 שעות. הסוכה לא נשענת עליו: נדרש היתר פרטני (ס׳ 6); בקשה 3885 בבדיקה.'],
     ];
     return {
       title: 'החוק',
@@ -289,7 +347,7 @@
           <summary><span class="acc-num">${i + 1}</span><span class="acc-title">${esc(s.title_he)}</span>${icon('chev', 'acc-chev')}</summary>
           <div class="acc-body">
             <p class="law-summary">${esc(s.summary_he)}</p>
-            ${s.quotes.map(quoteHTML).join('')}
+            ${s.quotes.map((q, qi) => quoteHTML(q, s.id, qi)).join('')}
             <div class="sec-actions no-print">
               <a class="btn btn-ghost btn-sm" href="#/law/${s.id}/show">${icon('handover')}<span>הצג במסך מלא</span></a>
               <button class="btn btn-ghost btn-sm" type="button" data-share="#/law/${s.id}">${icon('share')}<span>קישור לנושא</span></button>
@@ -299,15 +357,17 @@
         <h2 class="sec-title">שאלות ותשובות</h2>
         <div class="acc faq">${LAW.faq.map((f) => `<details class="acc-item"><summary><span class="acc-title">${esc(f.q_he)}</span>${icon('chev', 'acc-chev')}</summary><div class="acc-body"><p>${esc(f.a_he)}</p></div></details>`).join('')}</div>
         <h2 class="sec-title">כל המקורות</h2>
-        <ul class="linklist">${LAW.links.map((l) => `<li>${ext(l.url, l.label_he, 'link-row')}</li>`).join('')}</ul>
+        <ul class="linklist">${LAW.links.map((l) => `<li>${srcLink(linkTarget(l), l.url, l.label_he, 'link-row')}</li>`).join('')}</ul>
         <p class="disclaimer">${esc(DISCLAIMER)}</p>
       </div>${footer()}`,
       after: id ? () => { const el = document.getElementById('law-' + id); if (el) { el.open = true; requestAnimationFrame(() => el.scrollIntoView({ block: 'start' })); } return true; } : null,
     };
   }
 
-  function quoteHTML(q) {
-    return `<figure class="quote"><blockquote>${esc(q.text_he)}</blockquote><figcaption><span class="q-src">${esc(q.source_name_he)}</span><span class="q-sec">${esc(q.section)}</span>${ext(q.url, 'למקור')}</figcaption></figure>`;
+  /* law.json quote i of section sid is highlight "<sid>.q<i>" in content/sources.json. */
+  function quoteHTML(q, sid, i) {
+    const t = sid != null ? hlAt[`${sid}.q${i}`] || null : null;
+    return `<figure class="quote"><blockquote>${esc(q.text_he)}</blockquote><figcaption><span class="q-src">${esc(q.source_name_he)}</span><span class="q-sec">${esc(q.section)}</span>${srcLink(t, q.url, previewable(t) ? 'הצג במקור' : 'למקור')}</figcaption></figure>`;
   }
 
   function showLaw(id) {
@@ -318,7 +378,7 @@
         <p class="show-kicker">צום לשלום 2026 · מה החוק אומר</p>
         <h1 class="show-title">${esc(s.title_he)}</h1>
         <p class="show-lead">${esc(s.summary_he)}</p>
-        ${s.quotes.map(quoteHTML).join('')}`),
+        ${s.quotes.map((q, qi) => quoteHTML(q, s.id, qi)).join('')}`),
     };
   }
 
@@ -363,7 +423,7 @@
         <p class="show-kicker">צום לשלום 2026 · סוכת השלום</p>
         <div class="show-say">${sayHTML(s.what_to_say_he)}</div>
         <h2 class="ho-h">מה כדאי לדעת</h2>
-        ${know.map((k) => `<section class="know"><h3>${esc(k.title_he)}</h3><p>${esc(k.summary_he)}</p>${k.quotes[0] ? quoteHTML(k.quotes[0]) : ''}</section>`).join('')}`),
+        ${know.map((k) => `<section class="know"><h3>${esc(k.title_he)}</h3><p>${esc(k.summary_he)}</p>${k.quotes[0] ? quoteHTML(k.quotes[0], k.id, 0) : ''}</section>`).join('')}`),
     };
   }
 
@@ -426,6 +486,7 @@
         <dl class="dl">${details.map((d) => `<div class="dl-row"><dt>${esc(d.label_he)}</dt><dd>${esc(d.value_he)}</dd></div>`).join('')}</dl>
         ${desc ? `<details class="acc-item desc"><summary><span class="acc-title">${esc(desc.label_he)}</span>${icon('chev', 'acc-chev')}</summary><div class="acc-body">${paras(desc.value_he.replace(/\n/g, '\n\n'))}</div></details>` : ''}
         <h2 class="sec-title">ההודעה בכתב שצורפה</h2>
+        ${R.notice_caption_he ? `<p class="letter-caption" role="note">${esc(R.notice_caption_he)}</p>` : ''}
         <div class="letter">${letterHTML(R.notice_letter_he)}</div>
         <p class="sec-lead">עותק לפרסום: ת.ז., טלפון ודוא״ל הוסרו.</p>
         <h2 class="sec-title">המסמכים</h2>
@@ -454,6 +515,7 @@
         ${statusBox(STATUS_FULL)}
         <div class="ho-rows ho-rows-wide">${rows.map((d) => `<div class="ho-row"><div class="ho-k">${esc(d.label_he.replace(' (מתוך תיאור האירוע)', '').replace(' (הערכה)', ''))}</div><div class="ho-v">${esc(d.value_he)}</div></div>`).join('')}</div>
         <h2 class="ho-h">ההודעה בכתב שצורפה</h2>
+        ${R.notice_caption_he ? `<p class="letter-caption" role="note">${esc(R.notice_caption_he)}</p>` : ''}
         <div class="letter">${letterHTML(R.notice_letter_he)}</div>
         <h2 class="ho-h">עותק הבקשה שהוגשה</h2>
         <a class="show-img" href="docs/request-3885-submitted-redacted.png" target="_blank" rel="noopener"><img src="docs/request-3885-submitted-redacted.png" alt="עותק הבקשה שהוגשה, פנייה 3885. פרטים אישיים הושחרו." loading="lazy"></a>`),
@@ -497,13 +559,17 @@
     const row = (p) => {
       const type = /\.pdf$/i.test(p.file) ? 'PDF' : 'PNG';
       const size = FILES[p.file];
+      const pv = srcByFile[p.file] ? { slug: srcByFile[p.file], h: null } : null;
+      const openBtn = previewable(pv)
+        ? `<a class="btn btn-ghost btn-sm" href="${srcHref(pv)}">${icon('src')}<span>פתיחה</span></a>`
+        : `<a class="btn btn-ghost btn-sm" href="${esc(p.file)}" target="_blank" rel="noopener">${icon('ext')}<span>פתיחה</span></a>`;
       return `<article class="docrow">
         <span class="ftype ftype-${type.toLowerCase()}" aria-hidden="true">${type}</span>
         <div class="docrow-main">
           <h3>${esc(p.label_he)}</h3>
           <p>${esc(p.note_he)}</p>
           <div class="docmeta">
-            <a class="btn btn-ghost btn-sm" href="${esc(p.file)}" target="_blank" rel="noopener">${icon('ext')}<span>פתיחה</span></a>
+            ${openBtn}
             <a class="btn btn-ghost btn-sm" href="${esc(p.file)}" download>${icon('download')}<span>הורדה</span></a>
             ${size ? `<span class="size">${type} · ${fmtSize(size)}</span>` : ''}
           </div>
@@ -514,11 +580,14 @@
     const official = DOCS.pdfs.filter((p) => !/3885/.test(p.file));
     const audio = ['police', 'inspector'].map((w) => {
       const a = OFF[w].audio;
-      return `<article class="docrow">
-        <span class="ftype ftype-audio" aria-hidden="true">${icon('play')}</span>
+      return `<article class="docrow docrow-audio">
+        <span class="ftype ftype-audio" aria-hidden="true">${icon('mic')}</span>
         <div class="docrow-main">
           <h3>הסבר קולי · ${esc(OFF[w].greeting_he)}</h3>
           <p>הקלטה בעברית, ${fmtTime(a.duration_s)} דקות.</p>
+        </div>
+        <div class="docrow-wide">
+          ${player(w, { title: 'האזנה', compact: true })}
           <div class="docmeta">
             <a class="btn btn-ghost btn-sm" href="${esc(a.mp3)}" download>${icon('download')}<span>MP3</span></a>
             <a class="btn btn-ghost btn-sm" href="${esc(a.m4a)}" download>${icon('download')}<span>M4A</span></a>
@@ -537,8 +606,8 @@
         <div class="doclist">${official.map(row).join('')}</div>
         <h2 class="sec-title">ההקלטות</h2>
         <div class="doclist">${audio}</div>
-        <h2 class="sec-title">מקורות רשמיים ברשת</h2>
-        <ul class="linklist">${LAW.links.map((l) => `<li>${ext(l.url, l.label_he, 'link-row')}</li>`).join('')}</ul>
+        <h2 class="sec-title">מקורות רשמיים</h2>
+        <ul class="linklist">${LAW.links.map((l) => `<li>${srcLink(linkTarget(l), l.url, l.label_he, 'link-row')}</li>`).join('')}</ul>
       </div>${footer()}`,
     };
   }
@@ -609,45 +678,109 @@
   }
 
   function bindPlayers(root) {
+    const getRate = () => { const r = parseFloat(store('ffp-rate')); return RATES.indexOf(r) >= 0 ? r : 1; };
     root.querySelectorAll('[data-player]').forEach((pl) => {
       const au = pl.querySelector('audio'), btn = pl.querySelector('.player-btn'), bar = pl.querySelector('.player-bar');
-      const fill = pl.querySelector('.player-fill'), cur = pl.querySelector('.t-cur'), dur = pl.querySelector('.t-dur');
+      const fill = pl.querySelector('.player-fill'), knob = pl.querySelector('.player-knob'), tip = pl.querySelector('.player-tip');
+      const cur = pl.querySelector('.t-cur'), dur = pl.querySelector('.t-dur');
+      const title = (pl.querySelector('.player-title') || {}).firstChild;
       const maxD = () => (au.duration && isFinite(au.duration) ? au.duration : +bar.getAttribute('aria-valuemax'));
-      btn.addEventListener('click', () => {
-        if (au.paused) {
-          pauseAll(au);
-          pl.classList.add('loading');
-          const p = au.play();
-          if (p && p.catch) p.catch(() => { pl.classList.remove('loading'); toast('לא ניתן לנגן כרגע. נסו שוב.'); });
-        } else au.pause();
-      });
-      au.addEventListener('playing', () => { pl.classList.remove('loading'); pl.classList.add('playing'); btn.setAttribute('aria-label', 'השהיית ההקלטה'); });
-      au.addEventListener('pause', () => { pl.classList.remove('playing', 'loading'); btn.setAttribute('aria-label', 'השמעת ההסבר הקולי'); });
-      au.addEventListener('ended', () => { pl.classList.remove('playing'); });
-      au.addEventListener('loadedmetadata', () => { if (isFinite(au.duration)) dur.textContent = fmtTime(au.duration); });
-      au.addEventListener('timeupdate', () => {
-        const d = maxD(); const f = d ? Math.min(1, au.currentTime / d) : 0;
-        fill.style.width = (f * 100).toFixed(2) + '%'; cur.textContent = fmtTime(au.currentTime);
-        bar.setAttribute('aria-valuenow', String(Math.round(au.currentTime)));
-      });
-      const seek = (x) => {
-        const r = bar.getBoundingClientRect();
-        const f = Math.min(1, Math.max(0, (r.right - x) / r.width));
-        try { au.currentTime = f * maxD(); } catch (e) { /* not seekable yet */ }
-        fill.style.width = (f * 100).toFixed(2) + '%';
+      let pending = null, dragging = false;
+      const now = () => (pending != null ? pending : au.currentTime || 0);
+
+      const paint = (t) => {
+        const d = maxD(); const f = d ? Math.min(1, Math.max(0, t / d)) : 0;
+        const pct = (f * 100).toFixed(2) + '%';
+        fill.style.width = pct; knob.style.left = pct; tip.style.left = pct;
+        cur.textContent = fmtTime(t); tip.textContent = fmtTime(t);
+        bar.setAttribute('aria-valuenow', String(Math.round(t)));
+        bar.setAttribute('aria-valuetext', `${fmtSpoken(t)} מתוך ${fmtSpoken(d)}`);
       };
-      bar.addEventListener('pointerdown', (e) => {
-        seek(e.clientX);
-        const mv = (ev) => seek(ev.clientX);
-        const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
-        window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+      /* Seek works before the file has loaded: remember the target and apply it on metadata. */
+      const seekTo = (t) => {
+        t = Math.min(maxD(), Math.max(0, t));
+        if (au.readyState >= 1) { try { au.currentTime = t; pending = null; } catch (e) { pending = t; } } else pending = t;
+        paint(t);
+      };
+      const setRate = (r) => {
+        au.defaultPlaybackRate = r; au.playbackRate = r;
+        pl.querySelectorAll('[data-rate]').forEach((b) => b.setAttribute('aria-pressed', String(+b.getAttribute('data-rate') === r)));
+      };
+      setRate(getRate());
+
+      const play = () => {
+        pauseAll(au);
+        pl.classList.add('loading');
+        au.playbackRate = au.defaultPlaybackRate;
+        const p = au.play();
+        if (p && p.catch) p.catch(() => { pl.classList.remove('loading'); toast('לא ניתן לנגן כרגע. נסו שוב.'); });
+      };
+      const toggle = () => { if (au.paused) play(); else au.pause(); };
+      btn.addEventListener('click', toggle);
+      pl.querySelectorAll('[data-skip]').forEach((b) => b.addEventListener('click', () => seekTo(now() + +b.getAttribute('data-skip'))));
+      pl.querySelectorAll('[data-rate]').forEach((b) => b.addEventListener('click', () => {
+        const r = +b.getAttribute('data-rate'); store('ffp-rate', String(r));
+        document.querySelectorAll('[data-player]').forEach((o) => { const x = o.querySelector('audio'); x.defaultPlaybackRate = r; x.playbackRate = r; o.querySelectorAll('[data-rate]').forEach((c) => c.setAttribute('aria-pressed', String(+c.getAttribute('data-rate') === r))); });
+        setRate(r);
+      }));
+
+      au.addEventListener('loadedmetadata', () => {
+        if (isFinite(au.duration)) { dur.textContent = fmtTime(au.duration); bar.setAttribute('aria-valuemax', String(Math.round(au.duration))); }
+        if (pending != null) { try { au.currentTime = pending; } catch (e) { /* ignore */ } pending = null; }
+        au.playbackRate = au.defaultPlaybackRate;
       });
+      au.addEventListener('playing', () => { pl.classList.remove('loading'); pl.classList.add('playing'); btn.setAttribute('aria-label', 'השהיה'); mediaSession(au, title ? title.textContent : document.title, play, seekTo, now); });
+      au.addEventListener('pause', () => { pl.classList.remove('playing', 'loading'); btn.setAttribute('aria-label', 'השמעה'); });
+      au.addEventListener('ended', () => { pl.classList.remove('playing'); });
+      au.addEventListener('timeupdate', () => { if (!dragging && pending == null) paint(au.currentTime); });
+
+      /* Scrubber: tap jumps to that exact moment, drag scrubs with a live time bubble. LTR timeline. */
+      const fromX = (x) => { const r = bar.getBoundingClientRect(); return Math.min(1, Math.max(0, (x - r.left) / r.width)) * maxD(); };
+      bar.addEventListener('pointerdown', (e) => {
+        if (e.button > 0) return;
+        e.preventDefault(); dragging = true; pl.classList.add('scrubbing');
+        try { bar.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        bar.focus({ preventScroll: true });
+        paint(fromX(e.clientX));
+      });
+      bar.addEventListener('pointermove', (e) => { if (dragging) paint(fromX(e.clientX)); });
+      const end = (e) => {
+        if (!dragging) return;
+        dragging = false; pl.classList.remove('scrubbing');
+        seekTo(fromX(e.clientX));
+      };
+      bar.addEventListener('pointerup', end);
+      bar.addEventListener('pointercancel', () => { dragging = false; pl.classList.remove('scrubbing'); paint(now()); });
+
+      const KEYS = { ArrowRight: 5, ArrowLeft: -5, ArrowUp: 5, ArrowDown: -5, PageUp: 10, PageDown: -10 };
       bar.addEventListener('keydown', (e) => {
-        if (e.key === 'ArrowLeft') { au.currentTime = Math.min(maxD(), au.currentTime + 5); e.preventDefault(); }
-        if (e.key === 'ArrowRight') { au.currentTime = Math.max(0, au.currentTime - 5); e.preventDefault(); }
-        if (e.key === ' ' || e.key === 'Enter') { btn.click(); e.preventDefault(); }
+        if (KEYS[e.key] != null) { seekTo(now() + KEYS[e.key] * (e.shiftKey ? 2 : 1)); e.preventDefault(); }
+        else if (e.key === 'Home') { seekTo(0); e.preventDefault(); }
+        else if (e.key === 'End') { seekTo(maxD()); e.preventDefault(); }
+        else if (e.key === ' ' || e.key === 'Enter' || e.code === 'KeyK') { toggle(); e.preventDefault(); }
+      });
+      /* Anywhere inside the player: j / l = ±10 s, k = play/pause (video-player convention). */
+      pl.addEventListener('keydown', (e) => {
+        if (e.target === bar || e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.code === 'KeyJ') { seekTo(now() - 10); e.preventDefault(); }
+        else if (e.code === 'KeyL') { seekTo(now() + 10); e.preventDefault(); }
+        else if (e.code === 'KeyK') { toggle(); e.preventDefault(); }
       });
     });
+  }
+
+  /* Lock-screen / headset controls on phones (feature-detected). */
+  function mediaSession(au, title, play, seekTo, now) {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      const ms = navigator.mediaSession;
+      if (window.MediaMetadata) ms.metadata = new MediaMetadata({ title, artist: 'צום לשלום 2026', artwork: [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }] });
+      ms.setActionHandler('play', play);
+      ms.setActionHandler('pause', () => au.pause());
+      ms.setActionHandler('seekbackward', (d) => seekTo(now() - ((d && d.seekOffset) || 10)));
+      ms.setActionHandler('seekforward', (d) => seekTo(now() + ((d && d.seekOffset) || 10)));
+      ms.setActionHandler('seekto', (d) => { if (d && d.seekTime != null) seekTo(d.seekTime); });
+    } catch (e) { /* some actions unsupported */ }
   }
 
   let toastTimer = 0;
@@ -695,12 +828,19 @@
     });
   }
 
+  /* The one encoding this browser will play: the same order as the <source> list (m4a, mp3, ogg). The service worker
+     keeps only that one offline. */
+  const AUDIO_EXT = (() => {
+    try { const a = document.createElement('audio'); if (a.canPlayType('audio/mp4')) return 'm4a'; if (a.canPlayType('audio/mpeg')) return 'mp3'; if (a.canPlayType('audio/ogg')) return 'ogg'; } catch (e) { /* ignore */ }
+    return 'mp3';
+  })();
+
   async function markOffline(root) {
     const els = root.querySelectorAll('[data-offline]');
     if (!els.length || !('caches' in window)) return;
     try {
       const hit = await caches.match('docs/notice-3885-redacted.pdf');
-      const hit2 = await caches.match('audio/police.mp3');
+      const hit2 = await caches.match(`audio/police.${AUDIO_EXT}`);
       if (hit && hit2) els.forEach((e) => { e.hidden = false; });
     } catch (e) { /* ignore */ }
   }
@@ -709,13 +849,39 @@
   let inApp = false;
   let lastMode = 'page';
 
-  function parse() {
-    return location.hash.replace(/^#\/?/, '').split('?')[0].split('/').filter(Boolean).map((p) => { try { return decodeURIComponent(p); } catch (e) { return p; } });
+  function parse(hash) {
+    return (hash == null ? location.hash : hash).replace(/^#\/?/, '').split('?')[0].split('/').filter(Boolean).map((p) => { try { return decodeURIComponent(p); } catch (e) { return p; } });
   }
 
-  function render() {
-    pauseAll();
+  /* Source viewer = an overlay route. The page underneath is NOT re-rendered while it is open, so closing it
+     (back button, ✕, Esc) lands on the exact spot it was opened from, open accordions included. */
+  let baseHash = null;
+  let viewerFromApp = false;
+  const isSourceHash = (h) => parse(h)[0] === 'source';
+  function route() {
     const parts = parse();
+    if (parts[0] === 'source' && SV) {
+      if (baseHash == null) render('#/'); /* deep link: the hub sits underneath */
+      const q = new URLSearchParams(location.hash.split('?')[1] || '');
+      const h = /^\d+$/.test(q.get('h') || '') ? +q.get('h') : null;
+      SV.open(parts[1] || '', h, { onClose: closeViewer });
+      return;
+    }
+    if (SV && SV.isOpen()) {
+      SV.close();
+      if ((location.hash || '#/') === baseHash) return;
+    }
+    render();
+  }
+  function closeViewer() {
+    if (viewerFromApp && history.length > 1) history.back();
+    else location.hash = baseHash || '#/';
+  }
+
+  function render(hashOverride) {
+    pauseAll();
+    const parts = parse(hashOverride);
+    baseHash = hashOverride || location.hash || '#/';
     const key = parts[0] || '';
     const fn = Object.prototype.hasOwnProperty.call(ROUTES, key) ? ROUTES[key] : viewNotFound;
     const view = fn(parts.slice(1)) || viewNotFound();
@@ -747,7 +913,7 @@
     updateNav(key);
     markOffline(main);
 
-    const here = location.hash || '#/';
+    const here = baseHash;
     let handled = false;
     if (view.after) handled = !!view.after(main);
     if (!handled) {
@@ -759,9 +925,14 @@
   }
 
   window.addEventListener('hashchange', (e) => {
-    try { const old = new URL(e.oldURL).hash || '#/'; scrollMemo[old] = window.scrollY; } catch (err) { /* ignore */ }
+    let old = '#/';
+    try { old = new URL(e.oldURL).hash || '#/'; } catch (err) { /* ignore */ }
+    const fromSource = isSourceHash(old), toSource = isSourceHash();
+    if (!fromSource) scrollMemo[old] = window.scrollY;
+    if (toSource && !fromSource) viewerFromApp = true;
+    else if (!toSource) viewerFromApp = false;
     inApp = true;
-    render();
+    route();
   });
 
   document.addEventListener('click', (e) => {
@@ -769,15 +940,23 @@
     if (s) { e.preventDefault(); share(s.getAttribute('data-share') || ''); }
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { const x = main.querySelector('[data-exit]'); if (x) x.click(); }
+    if (e.key === 'Escape') {
+      if (SV && SV.isOpen()) { closeViewer(); return; }
+      const x = main.querySelector('[data-exit]'); if (x) x.click();
+    }
   });
   window.addEventListener('beforeprint', () => document.querySelectorAll('details').forEach((d) => { d.open = true; }));
 
-  render();
+  route();
 
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(() => setTimeout(() => markOffline(main), 1500)).catch(() => { /* offline cache unavailable */ });
+      navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'backfilled') markOffline(main); });
+      navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then((reg) => {
+        /* Fill in whatever the install could not fetch (documents, snapshots, this browser's audio encoding). */
+        if (reg.active) reg.active.postMessage({ type: 'backfill', audio: AUDIO_EXT });
+        setTimeout(() => markOffline(main), 1500);
+      }).catch(() => { /* offline cache unavailable */ });
     });
   }
 })();
